@@ -19,9 +19,8 @@ name: WorkBuddy 每日自动签到
 
 on:
   schedule:
-    # GitHub Actions 使用 UTC 时间；北京时间 09:17 ≈ UTC 01:17
-    # ⚠️ 刻意避开整点：GitHub 官方说明每小时整点是调度高峰，整点任务常被延迟数分钟~数十分钟
-    - cron: '17 1 * * *'
+    # [临时测试] 验证 fork 中 schedule 是否能触发，稍后恢复为 17 1 * * *
+    - cron: '5 2 * * *'
   # 支持在 Actions 页面手动触发（首次配置后建议先手动跑一次验证）
   workflow_dispatch:
     inputs:
