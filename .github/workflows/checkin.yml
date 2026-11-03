@@ -19,8 +19,8 @@ name: WorkBuddy 每日自动签到
 
 on:
   schedule:
-    # [临时测试] 验证 fork 中 schedule 是否能触发，稍后恢复为 17 1 * * *
-    - cron: '5 2 * * *'
+    # [临时测试] 02:22 / 02:27 / 02:32 UTC 三连击，验证 fork 中 schedule 是否会触发
+    - cron: '22,27,32 2 * * *'
   # 支持在 Actions 页面手动触发（首次配置后建议先手动跑一次验证）
   workflow_dispatch:
     inputs:
