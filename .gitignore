@@ -13,12 +13,16 @@ notify_config.json
 notify_config.json.example
 *.local
 *.secret
+*.pat
 credentials.json
 credentials*.json
 *.pem
 *.key
 *.p12
 id_rsa*
+
+# ---- WorkBuddy 本地工作区（含记忆/会话上下文，可能带个人信息）----
+.workbuddy/
 
 # ---- 脚本运行产物 ----
 result.json

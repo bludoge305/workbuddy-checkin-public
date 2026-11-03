@@ -1,0 +1,9 @@
+{
+  "repo": "OWNER/REPO",
+  "workflow_file": "checkin.yml",
+  "ref": "main",
+  "token_file": "~/.workbuddy/secrets/workbuddy-checkin.pat",
+  "timezone_offset_hours": 8,
+  "dispatch_wait_seconds": 150,
+  "run_wait_seconds": 300
+}
