@@ -110,7 +110,10 @@ python scripts/workbuddy_checkin.py --diagnose
 
 1. 点击仓库右上角 **Fork**，把本仓库复制到你的账号下。
 2. 进入你 Fork 出的仓库，按下方「配置 Secrets」添加凭据。
-3. 到 **Actions** 页面启用工作流，手动 **Run workflow** 验证一次即可。
+3. 到 **Actions** 页面启用工作流，手动 **Run workflow** 验证一次。
+4. **定时触发需要额外配置**：fork 仓库的 GitHub 内置 `schedule` 默认不启用，见下方「外部定时触发」。
+
+> ⚠️ 别指望 Fork 后 GitHub 自己按时跑。公共仓库被 fork 后 schedule 默认关闭，且 fork 创建不会产生 push 事件，cron 根本不会注册 —— 表现为「手动能跑、到点不动」，日志里也查不到失败记录。
 
 ### 方式 B：手动新建仓库
 
@@ -122,6 +125,8 @@ git add .
 git commit -m "feat: WorkBuddy 每日自动签到 (GitHub Actions)"
 git push -u origin main
 ```
+
+> 非 fork 的独立仓库可以直接用 GitHub 内置 `schedule`（本仓库早期版本即如此）。但公共仓库连续 60 天无 push 会被自动停用，长期无人提交同样会静默失效。
 
 ### 配置 Secrets
 
@@ -163,6 +168,60 @@ python scripts/sync_token_to_github.py --dry-run
 
 到仓库 **Actions** 页面 → 选择「WorkBuddy 每日自动签到」→ **Run workflow**。
 首次建议勾选 `check_only`（仅查询，不领取）确认接口联通，再跑一次真实签到。看到 `status: ok` 即配置成功。
+
+---
+
+## 外部定时触发（fork 仓库必看）
+
+本工作流**不再配置 `schedule`**，只保留 `workflow_dispatch`，由任意外部定时服务（cron-job.org、UptimeRobot、自己的服务器 cron 等）调用 GitHub REST API 触发。这样同时绕开两个平台限制：
+
+- 公共仓库被 fork 后，内置 `schedule` 默认不启用（而且 fork 不产生 push 事件，cron 连注册都不会发生）
+- 公共仓库连续 60 天无 push 活动，内置 `schedule` 会被自动停用
+
+### 1. 创建触发令牌
+
+`Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token`
+
+| 项 | 填写 |
+|---|---|
+| Repository access | Only select repositories → 只勾本仓库 |
+| Permissions → Repository permissions → Actions | **Read and write** |
+| Expiration | 建议 90 天以上，或选 No expiration（到期会静默失效，见下方注意事项） |
+
+不要用账号密码，也不要用 `gh auth login` 产生的临时令牌（登出即失效）。
+
+### 2. 触发命令
+
+```bash
+curl -X POST \
+  "https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/checkin.yml/dispatches" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer <你的令牌>" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  -H "Content-Type: application/json" \
+  -d '{"ref":"main"}'
+```
+
+正常返回 **HTTP 204 No Content**（无响应体，属 2xx，cron-job.org / UptimeRobot 都会记为成功）。随后数秒内 Actions 页面会出现一条 `workflow_dispatch` 运行。
+
+只想查询状态、不实际领取，body 改为：
+
+```json
+{"ref":"main","inputs":{"check_only":"true"}}
+```
+
+> API 中 `inputs` 的值必须是**字符串**（`"true"` 而非 `true`），否则接口返回 422。
+
+### 3. 定时服务设置要点
+
+- Crontab 建议 `17 9 * * *`，时区选 `Asia/Shanghai`。**避开整点**：GitHub 说明每小时整点是调度高峰，整点任务常被延迟。
+- 不要设成 `*/15` 之类的短间隔——签到按自然日一次即可，多余触发虽安全但会刷屏运行记录。
+- 务必开启该服务自身的**失败通知**：令牌过期、仓库改名等情况接口会返回 401/404，这是唯一能让你及时发现的信号。
+
+### 4. 注意事项
+
+- **幂等**：重复触发不会重复领取，脚本会输出「今日已签到，无需重复领取，当前积分余额 N」。
+- **令牌到期日要记**：令牌过期后接口直接 401，签到会静默停止。到期前重新生成并替换定时任务里的 `Authorization` 头。
 
 ---
 
@@ -311,8 +370,15 @@ A：来自你本机 WorkBuddy 桌面客户端的登录态。`sync_token_to_githu
 A：不会。凭据只存在于你自己的 Secrets，不进代码、不进日志（且日志已收紧为只报长度）。
 你 Fork 的仓库别人也读不到你的 Secret。
 
+**Q：手动能跑，但到点不自动跑，日志里也没有失败记录？**
+A：几乎必然是 fork 仓库的内置 `schedule` 没生效。GitHub 对公共仓库的 fork 默认不启用定时任务，
+且 fork 创建不产生 push 事件，cron 从未注册——所以「手动可跑、定时无运行、无报错」。
+解决：按上文「外部定时触发」配置外部服务调用 dispatch 接口。
+
 **Q：签到时间能改吗？**
-A：编辑 `.github/workflows/checkin.yml` 里的 `cron` 表达式即可（UTC 时间）。
+A：本工作流已移除内置 `schedule`，签到时间由你的外部定时服务的 crontab 决定（见「外部定时触发」）。
+若你是非 fork 的独立仓库、坚持用内置 `schedule`，则编辑 `.github/workflows/checkin.yml` 的 `cron`
+表达式（UTC 时间，建议避开整点）。
 
 **Q：一直接收不到失败提醒？**
 A：检查是否配置了任一通知通道 Secret；否则失败只体现为 Actions 页面红灯与 GitHub 邮件。
