@@ -8,13 +8,20 @@ name: WorkBuddy 每日自动签到
 #    WB_REFRESH_TOKEN — 长效令牌，每次运行先向插件网关换取接口令牌（推荐）
 #    WB_ACCESS_TOKEN  — 短效接口令牌直通（兼容 5.5.x 及更早 / 未加密登录态）
 #  两者都配时脚本会优先使用 WB_REFRESH_TOKEN。
+#
+#  ⚠️ 两个平台级坑（排查「不自动签到」先看这里）：
+#   1) 若本仓库是 fork：GitHub 对公共仓库的 fork 默认不启用 schedule，
+#      且 fork 创建时不产生 push 事件，cron 因此从未注册。
+#      修复 = 在 fork 的默认分支上做一次 push（改本文件即可），或改用非 fork 的独立仓库。
+#   2) 公共仓库连续 60 天无 push 活动，GitHub 会自动停用 schedule。
+#      长期无人提交的仓库需定期推一次提交（keepalive）保活。
 # ─────────────────────────────────────────────────────────────
 
 on:
   schedule:
-    # GitHub Actions 使用 UTC 时间；北京时间 09:00 = UTC 01:00
-    # ⚠️ 定时任务在整点前后可能有数分钟~数十分钟延迟，属 GitHub 正常现象
-    - cron: '0 1 * * *'
+    # GitHub Actions 使用 UTC 时间；北京时间 09:17 ≈ UTC 01:17
+    # ⚠️ 刻意避开整点：GitHub 官方说明每小时整点是调度高峰，整点任务常被延迟数分钟~数十分钟
+    - cron: '17 1 * * *'
   # 支持在 Actions 页面手动触发（首次配置后建议先手动跑一次验证）
   workflow_dispatch:
     inputs:
