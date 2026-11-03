@@ -107,8 +107,9 @@ jobs:
         if: always()
         # 只输出白名单字段，不把完整 result.json 写入摘要
         # （摘要会长期留存于 Actions 页面，应避免暴露原始接口响应全文）
+        # 用 tee 同时写 stdout：让外部巡检脚本能从运行日志里取回同一份摘要
         run: |
-          python scripts/summarize_result.py result.json >> "$GITHUB_STEP_SUMMARY"
+          python scripts/summarize_result.py result.json | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 失败时终止任务（触发 GitHub 失败通知）
         if: steps.checkin.outcome != 'success'
