@@ -9,19 +9,16 @@ name: WorkBuddy 每日自动签到
 #    WB_ACCESS_TOKEN  — 短效接口令牌直通（兼容 5.5.x 及更早 / 未加密登录态）
 #  两者都配时脚本会优先使用 WB_REFRESH_TOKEN。
 #
-#  ⚠️ 两个平台级坑（排查「不自动签到」先看这里）：
-#   1) 若本仓库是 fork：GitHub 对公共仓库的 fork 默认不启用 schedule，
-#      且 fork 创建时不产生 push 事件，cron 因此从未注册。
-#      修复 = 在 fork 的默认分支上做一次 push（改本文件即可），或改用非 fork 的独立仓库。
-#   2) 公共仓库连续 60 天无 push 活动，GitHub 会自动停用 schedule。
-#      长期无人提交的仓库需定期推一次提交（keepalive）保活。
+#  ⚠️ 关于定时触发（重要）：
+#   本仓库为 fork 时，GitHub 对公共仓库 fork 的 schedule 默认不启用，
+#   且公共仓库连续 60 天无 push 会自动停用 schedule，两条都很难排查。
+#   因此本工作流不配置 schedule，改由外部定时服务通过 workflow_dispatch
+#   接口触发（见 README「外部定时触发」一节），彻底绕开上述限制。
 # ─────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    # [临时测试] 02:22 / 02:27 / 02:32 UTC 三连击，验证 fork 中 schedule 是否会触发
-    - cron: '22,27,32 2 * * *'
-  # 支持在 Actions 页面手动触发（首次配置后建议先手动跑一次验证）
+  # 仅保留手动 / 外部 API 触发：
+  #   POST /repos/{owner}/{repo}/actions/workflows/checkin.yml/dispatches  {"ref":"main"}
   workflow_dispatch:
     inputs:
       check_only:
