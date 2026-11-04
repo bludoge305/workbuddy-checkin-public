@@ -50,7 +50,13 @@ stdout 固定三段：`STATUS:` / `RUN:` / `---- SUMMARY ----` 加上摘要正�
 | `FALLBACK` | 1 | Actions 最终没签到成功 | **立即加载 `totorosir-workbuddy-checkin` 技能本地补签**，见下节 |
 | `ERROR` | 2 | token 失效、网络异常、配置缺失 | 原样转述 `REASON`，不要盲目重试 |
 
-判定依据：摘要出现 `| 结果 | 成功 |`、`✅ 签到成功`、`⏭️ 今日已签到`，或日志出现 `今日已签到，无需重复领取` / `"status": "ok"` 均算成功；出现 `| 结果 | 失败 |`、`❌ 签到失败`、`"status": "error"` 算失败。`🔍 仅查询` 不算签到，会被视为需要补触发。
+判定依据（以日志里的业务证据为准，不看运行结论）：
+
+- **失败**：`"checkin_http"` ≥ 400、`"transient_failure": true`、`| 结果 | 失败 |`、`❌ 签到失败`、`"status": "error"`，或出现「脚本说今日已签到、但状态查询 `today_checked_in: false`」这种自相矛盾。
+- **成功**：`| 结果 | 成功 |`、`✅ 签到成功`、`⏭️ 今日已签到`、`"action": "clicked"`、`"action": "skip_already_signed"`（且不与状态查询矛盾）。
+- **无证据**：以上都没有 → 判 `unknown`，按 FALLBACK 处理。
+
+> ⚠️ 不要用 `conclusion == success` 推断签到成功。2026-11-04 出现过「签到接口 HTTP 500 / code=10001 被脚本误判成已签到 → 工作流绿灯 → 实际漏签」的假成功，运行结论恰恰是 success。
 
 ## FALLBACK 的标准处理
 
@@ -82,7 +88,9 @@ stdout 固定三段：`STATUS:` / `RUN:` / `---- SUMMARY ----` 加上摘要正�
 - **401**：PAT 过期或被撤销。fine-grained token 有有效期，重新生成后覆盖 `token_file` 即可；如果同时用外部定时服务（如 cron-job.org）触发签到，记得同步更新那边的 `Authorization` 头，否则定时本身也会一起失效。
 - **404**：`repo` / `workflow_file` 写错，或 PAT 没有该仓库权限。
 - **已触发但等不到记录**：GitHub 队列拥堵，调大 `dispatch_wait_seconds` 或稍后重跑。
-- **摘要为空但 STATUS 是 OK**：日志下载失败或「输出运行摘要」步骤被改名 / 没写到 stdout；脚本会打印 `NOTE:`，不算失败。
+- **摘要为空但 STATUS 是 OK**：说明日志里确实有签到证据，只是没截到摘要表；脚本会打印 `NOTE:`。若连证据都没有，脚本会判 `FALLBACK` 而不是 OK。
+- **日志取不到分步骤文件**：GitHub 会在运行结束一段时间后重打包日志，`1_输出运行摘要.txt` 之类会退化成单个 `0_执行签到.txt`。脚本已回退到全量日志按锚点截取，不必处理。
+- **App 没在 09:10 运行**：自动化会在下次启动时补跑（24 小时内），但补跑只能事后兜底。真正的韧性来自签到脚本自身的重试（`MAX_RETRY=3`，5/10/15 秒退避）——瞬时 5xx 在 Actions 内部就自愈，不必等本机。
 
 ## 约束
 

@@ -111,7 +111,8 @@ def _auth_candidates():
 STATUS_PATH = "/billing/meter/checkin-activity-status"
 CHECKIN_PATH = "/billing/meter/daily-checkin"
 HTTP_TIMEOUT = 10
-MAX_RETRY = 1
+MAX_RETRY = 3
+RETRY_BASE_DELAY = 5
 VERSION = "2.2.0-ci"
 
 # 长效令牌刷新端点（插件网关；与桌面客户端刷新所用同一官方接口）
@@ -726,13 +727,15 @@ def run(check_only):
             result["detail"]["balance"] = result["balance"]
 
             # 判断是否已签到：兼容多种返回形态
+            # 注意：只有「状态查询本身成功（2xx）」时，业务码 10001 才可作为「已签到」的依据；
+            # 状态接口自己 5xx 也返回 10001，旧逻辑会把服务端故障误判为「今天已签」。
             today_signed = False
             if isinstance(st_body, dict):
                 if st_body.get("today_checked_in") is True:
                     today_signed = True
                 elif st_body.get("data", {}).get("today_checked_in") is True:
                     today_signed = True
-                elif str(st_body.get("code")) == "10001":
+                elif str(st_body.get("code")) == "10001" and 200 <= st_code < 300:
                     today_signed = True
 
             if check_only:
@@ -760,33 +763,56 @@ def run(check_only):
                 code = str(ck_body.get("code", ""))
                 msg = ck_body.get("msg") or ck_body.get("message") or ""
                 data = ck_body.get("data") if isinstance(ck_body.get("data"), dict) else {}
-                # 已签/重复提示（幂等保护）
-                if code == "10001" or "已签到" in msg or "今天已签到" in msg:
+                bal_txt = ("，当前积分余额 %s" % result["balance"]) if result.get("balance") is not None else ""
+
+                # 「已签到」类提示（幂等保护）——但不能只看业务码：
+                #   2026-11-04 事故：签到接口返回 HTTP 500 + code=10001「签到失败，请稍后重试」，
+                #   旧逻辑一律当成「今日已签到」直接 exit 0，工作流变绿灯、失败通知失效，实际漏签。
+                #   因此采信「已签到」必须满足其一：状态查询已确认今日已签，或本次响应本身是 2xx。
+                already_tip = (code == "10001" or "已签到" in msg or "今天已签到" in msg)
+                if already_tip and not (today_signed or 200 <= ck_code < 300):
+                    if ck_code >= 500:
+                        # 服务端瞬时故障：交给外层重试，不要在此处下结论
+                        last_err = "签到接口 HTTP %s（code=%s：%s）" % (ck_code, code, msg or "无消息")
+                        result["detail"]["transient_failure"] = True
+                    else:
+                        result.update(
+                            status="error", action="failed",
+                            msg="接口返回 code=%s（%s），且状态查询显示今日未签到" % (code, msg or "无消息"),
+                        )
+                        return result
+                elif already_tip:
                     result.update(status="ok", action="skip_already_signed",
-                                  msg="今日已签到（接口返回 code=10001）")
+                                  msg="今日已签到，无需重复领取" + bal_txt)
                     return result
-                # 领取成功判定：HTTP 2xx 且业务码为成功（兼容无 code / code=0 / code=200）
-                success_code = code in ("", "0", "200")
-                if 200 <= ck_code < 300 and success_code:
-                    credit = (ck_body.get("credit") or data.get("credit")
-                              or data.get("daily_credit") or data.get("today_credit"))
-                    streak = ck_body.get("streak_days") or data.get("streak_days")
-                    # 领取响应若带回余额则覆盖状态响应中的值
-                    bbal = _extract_balance(ck_body)
-                    if bbal is not None:
-                        result["balance"] = bbal
-                        result["detail"]["balance"] = bbal
-                    bal_txt = ("，当前积分余额 %s" % result["balance"]) if result.get("balance") is not None else ""
-                    result.update(status="ok", action="clicked",
-                                  points=credit,
-                                  msg="领取成功" + (("，+%s 积分" % credit) if credit else "") +
-                                      (("，连续第 %s 天" % streak) if streak else "") + bal_txt)
-                    result["detail"]["streak_days"] = streak
-                    return result
-                # 其余视为失败（含 2xx 但业务码异常、或非 2xx）
-                result.update(status="error", action="failed",
-                              msg=msg or ("HTTP %s（业务码 %s）" % (ck_code, code)))
-                return result
+                else:
+                    # 领取成功判定：HTTP 2xx 且业务码为成功（兼容无 code / code=0 / code=200）
+                    success_code = code in ("", "0", "200")
+                    if 200 <= ck_code < 300 and success_code:
+                        credit = (ck_body.get("credit") or data.get("credit")
+                                  or data.get("daily_credit") or data.get("today_credit"))
+                        streak = ck_body.get("streak_days") or data.get("streak_days")
+                        # 领取响应若带回余额则覆盖状态响应中的值
+                        bbal = _extract_balance(ck_body)
+                        if bbal is not None:
+                            result["balance"] = bbal
+                            result["detail"]["balance"] = bbal
+                        bal_txt = ("，当前积分余额 %s" % result["balance"]) if result.get("balance") is not None else ""
+                        result.update(status="ok", action="clicked",
+                                      points=credit,
+                                      msg="领取成功" + (("，+%s 积分" % credit) if credit else "") +
+                                          (("，连续第 %s 天" % streak) if streak else "") + bal_txt)
+                        result["detail"]["streak_days"] = streak
+                        return result
+                    if ck_code >= 500:
+                        # 服务端瞬时故障：交给外层重试
+                        last_err = "签到接口 HTTP %s（code=%s：%s）" % (ck_code, code, msg or "无消息")
+                        result["detail"]["transient_failure"] = True
+                    else:
+                        # 其余视为失败（含 2xx 但业务码异常、或 4xx）
+                        result.update(status="error", action="failed",
+                                      msg=msg or ("HTTP %s（业务码 %s）" % (ck_code, code)))
+                        return result
             else:
                 result.update(status="error", action="failed",
                               msg="领取接口返回非 JSON: %s" % ck_body.get("raw", "")[:200])
@@ -799,9 +825,9 @@ def run(check_only):
         except Exception as e:
             last_err = "异常: %s" % e
 
-        # 重试前稍作等待
+        # 重试前稍作等待（5s / 10s / 15s 递增，应对服务端瞬时 5xx）
         if attempt <= MAX_RETRY:
-            time.sleep(2)
+            time.sleep(RETRY_BASE_DELAY * attempt)
 
     result.update(status="error", msg="重试 %d 次后仍失败: %s" % (MAX_RETRY, last_err))
     return result

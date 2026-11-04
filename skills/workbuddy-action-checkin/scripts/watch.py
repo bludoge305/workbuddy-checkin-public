@@ -171,10 +171,12 @@ def wait_for_completion(cfg, run, timeout):
 
 
 def fetch_logs(cfg, run_id):
-    """返回 {"summary": 摘要步骤日志, "all": 全部日志拼接}。
+    """返回 {"summary": 摘要正文来源, "all": 全部日志拼接}。
 
-    日志 zip 里每个步骤一个 .txt，文件名形如 `1_输出运行摘要.txt`。
-    摘要只从「摘要」那个分块里取，避免拼进后续步骤的收尾日志。
+    ⚠️ 不能只依赖文件名：GitHub 会在运行结束一段时间后重打包日志，
+    分步骤文件（如 `1_输出运行摘要.txt`）会退化成单个 `0_执行签到.txt`，
+    此时按「文件名含摘要」找分块会一无所获（2026-11-04 因此误判为 OK）。
+    因此：有摘要分块就用它，没有就退回全量日志，由 extract_summary 按锚点截取。
     """
     empty = {"summary": "", "all": ""}
     status, payload, _ = request(
@@ -195,9 +197,9 @@ def fetch_logs(cfg, run_id):
         except Exception:
             continue
     chunks.sort(key=lambda item: item[0])
-    summary_text = "\n".join(text for name, text in chunks if "摘要" in name)
     all_text = "\n".join(text for _, text in chunks)
-    return {"summary": summary_text, "all": all_text}
+    summary_text = "\n".join(text for name, text in chunks if "摘要" in name)
+    return {"summary": summary_text or all_text, "all": all_text}
 
 
 def clean_log(text):
@@ -226,25 +228,46 @@ def extract_summary(text):
 
 
 def classify(summary, logs, conclusion):
-    """返回 (state, reason)，state ∈ {"ok", "checkonly", "fail"}。"""
+    """返回 (state, reason)，state ∈ {"ok", "checkonly", "fail", "unknown"}。
+
+    判定原则：**宁可判 unknown 走兜底，也不在没有证据时宣称成功。**
+    2026-11-04 事故：签到接口 500 + code=10001 被脚本当成「今日已签到」，
+    工作流结论是 success；旧版这里只要 conclusion == success 就返回 ok，
+    于是把一次真实漏签报成了 OK。现在必须以日志里的业务证据为准。
+    """
     text = (summary or "") + "\n" + clean_log(logs)
 
-    if "🔍 仅查询" in text:
+    # 1) 仅查询，不算签到
+    if "🔍 仅查询" in text or '"action": "skip_check_only"' in text:
         return "checkonly", "本次只是「仅查询」，没有真正领取"
+
+    # 2) 硬失败证据（优先于任何「成功」字样）
+    http_hit = re.search(r'"checkin_http":\s*(\d{3})', text)
+    if http_hit and int(http_hit.group(1)) >= 400:
+        return "fail", f"签到接口返回 HTTP {http_hit.group(1)}"
+    if '"transient_failure": true' in text:
+        return "fail", "签到接口瞬时故障，重试后仍未成功"
     if "| 结果 | 失败 |" in text or "❌ 签到失败" in text or '"status": "error"' in text:
-        return "fail", "摘要显示签到失败"
+        return "fail", "日志/摘要显示签到失败"
+    # 状态查询明确说「今天还没签」，却给了「今日已签到」的结论 → 自相矛盾，不信
+    if '"action": "skip_already_signed"' in text and '"today_checked_in": false' in text:
+        return "fail", "脚本称「今日已签到」，但状态查询显示今日未签到（结论矛盾）"
+
+    # 3) 成功证据：必须是业务动作层面的，不能用泛指的成功字样
     if (
         "| 结果 | 成功 |" in text
         or "✅ 签到成功" in text
         or "⏭️ 今日已签到" in text
         or "今日已签到，无需重复领取" in text
-        or '"status": "ok"' in text
+        or '"action": "clicked"' in text
+        or '"action": "skip_already_signed"' in text
     ):
         return "ok", ""
+
+    # 4) 无证据：不猜
     if conclusion == "success":
-        # 结论成功但摘要抓不到（日志下载失败等），不武断判失败
-        return "ok", "运行结论为 success，但未能从日志提取摘要"
-    return "fail", "日志里找不到签到成功的证据"
+        return "unknown", "运行结论为 success，但日志里找不到签到成功的证据"
+    return "unknown", f"运行结论为 {conclusion or '未知'}，且日志里找不到签到证据"
 
 
 def main():
@@ -279,8 +302,9 @@ def main():
     summary = extract_summary(logs["summary"])
     state, reason = classify(summary, logs["all"], target.get("conclusion") or target.get("status"))
 
-    # 今天只有「仅查询」或失败了 → 补触发一次真实签到
-    if state in ("checkonly", "fail"):
+    # 今天只有「仅查询」/ 失败 / 拿不到证据 → 补触发一次真实签到
+    # （补触发的运行日志是新生成的，能正常按步骤分块取到摘要，顺带把「读不到」变成「读得到」）
+    if state in ("checkonly", "fail", "unknown"):
         known = {run["id"] for run in list_runs(cfg)}
         dispatch(cfg)
         target = wait_for_new_run(cfg, known, cfg["dispatch_wait_seconds"])
